@@ -61,9 +61,11 @@ runs:
 
     - name: Install deepagents-cli
       shell: bash
+      env:
+        INPUT_CLI_VERSION: ${{ inputs.cli_version }}
       run: |
-        if [ -n "${{ inputs.cli_version }}" ]; then
-          uvx --from deepagents-cli==${{ inputs.cli_version }} deepagents --version
+        if [ -n "$INPUT_CLI_VERSION" ]; then
+          uvx --from "deepagents-cli==${INPUT_CLI_VERSION}" deepagents --version
         else
           uvx --from deepagents-cli deepagents --version
         fi
@@ -78,16 +80,19 @@ runs:
         OPENAI_API_KEY: ${{ inputs.openai_api_key }}
         GOOGLE_API_KEY: ${{ inputs.google_api_key }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_AUTO_APPROVE: ${{ inputs.auto_approve }}
+        INPUT_PROMPT: ${{ inputs.prompt }}
       run: |
         # Build command
-        CMD="uvx --from deepagents-cli deepagents"
+        CMD=(uvx --from deepagents-cli deepagents)
 
-        if [ -n "${{ inputs.model }}" ]; then
-          CMD="$CMD --model ${{ inputs.model }}"
+        if [ -n "$INPUT_MODEL" ]; then
+          CMD+=(--model "$INPUT_MODEL")
         fi
 
-        if [ "${{ inputs.auto_approve }}" == "true" ]; then
-          CMD="$CMD --auto-approve"
+        if [ "$INPUT_AUTO_APPROVE" == "true" ]; then
+          CMD+=(--auto-approve)
         fi
 
         # Create temp file for output
@@ -95,16 +100,17 @@ runs:
 
         # Run with prompt via -m flag
         set +e
-        $CMD -m "${{ inputs.prompt }}" 2>&1 | tee "$OUTPUT_FILE"
+        "${CMD[@]}" -m "$INPUT_PROMPT" 2>&1 | tee "$OUTPUT_FILE"
         EXIT_CODE=$?
         set -e
 
-        # Set outputs using heredoc for multiline
+        # Set outputs using heredoc with random delimiter
+        DELIMITER="DEEPAGENTS_$(openssl rand -hex 16)"
         {
           echo "exit_code=$EXIT_CODE"
-          echo "response<<DEEPAGENTS_EOF"
+          echo "response<<${DELIMITER}"
           cat "$OUTPUT_FILE"
-          echo "DEEPAGENTS_EOF"
+          echo "${DELIMITER}"
         } >> "$GITHUB_OUTPUT"
 
         rm -f "$OUTPUT_FILE"
