@@ -206,6 +206,7 @@ runs:
         CMD=(uvx --from deepagents-cli deepagents)
 
         CMD+=(--agent "$INPUT_AGENT_NAME")
+        CMD+=(--shell-allow-list "recommended,git")
 
         if [ -n "$INPUT_MODEL" ]; then
           CMD+=(--model "$INPUT_MODEL")
@@ -218,9 +219,9 @@ runs:
         # Create temp file for output
         OUTPUT_FILE=$(mktemp)
 
-        # Run with prompt via -m flag
+        # Run in non-interactive mode
         set +e
-        "${CMD[@]}" -m "$INPUT_PROMPT" 2>&1 | tee "$OUTPUT_FILE"
+        "${CMD[@]}" -n "$INPUT_PROMPT" 2>&1 | tee "$OUTPUT_FILE"
         EXIT_CODE=$?
         set -e
 
