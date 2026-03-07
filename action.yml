@@ -33,10 +33,6 @@ inputs:
     description: 'Working directory for the agent'
     required: false
     default: '.'
-  timeout:
-    description: 'Timeout in minutes'
-    required: false
-    default: '30'
   cli_version:
     description: 'deepagents-cli version (empty = latest)'
     required: false
@@ -191,7 +187,6 @@ runs:
       id: run-agent
       shell: bash
       working-directory: ${{ inputs.working_directory }}
-      timeout-minutes: ${{ fromJSON(inputs.timeout) }}
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         OPENAI_API_KEY: ${{ inputs.openai_api_key }}
