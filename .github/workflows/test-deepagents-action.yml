@@ -24,9 +24,9 @@ jobs:
         uses: ./
         with:
           prompt: ${{ github.event.inputs.prompt || 'List the files in this repository and summarize what the project does.' }}
+          model: claude-sonnet-4-6
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           agent_name: test-agent
-          timeout: '10'
 
       - name: Check outputs
         shell: bash
