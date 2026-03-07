@@ -37,7 +37,7 @@ jobs:
           gh api \
             --method POST \
             repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
-            -f content='+1'
+            -f content='brain'
 
       - uses: actions/checkout@v4
 
