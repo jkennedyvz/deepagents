@@ -201,7 +201,7 @@ runs:
         CMD=(uvx --from deepagents-cli deepagents)
 
         CMD+=(--agent "$INPUT_AGENT_NAME")
-        CMD+=(--shell-allow-list "recommended,git")
+        CMD+=(--shell-allow-list "recommended,git,gh")
 
         if [ -n "$INPUT_MODEL" ]; then
           CMD+=(--model "$INPUT_MODEL")
