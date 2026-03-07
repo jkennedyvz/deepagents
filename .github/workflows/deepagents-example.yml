@@ -37,3 +37,4 @@ jobs:
           prompt: ${{ github.event.inputs.prompt || github.event.comment.body }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Or: openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          # skills_repo: your-org/your-skills-repo@v1

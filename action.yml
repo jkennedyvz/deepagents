@@ -41,6 +41,10 @@ inputs:
     description: 'deepagents-cli version (empty = latest)'
     required: false
     default: ''
+  skills_repo:
+    description: 'GitHub repo of skills to clone (e.g. owner/repo, owner/repo@ref, or full URL)'
+    required: false
+    default: ''
 
 outputs:
   response:
@@ -69,6 +73,51 @@ runs:
         else
           uvx --from deepagents-cli deepagents --version
         fi
+
+    - name: Install skills
+      if: inputs.skills_repo != ''
+      shell: bash
+      env:
+        INPUT_SKILLS_REPO: ${{ inputs.skills_repo }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        # Parse optional @ref from repo spec (e.g. owner/repo@v1)
+        if [[ "$INPUT_SKILLS_REPO" == *"@"* ]]; then
+          REPO="${INPUT_SKILLS_REPO%%@*}"
+          REF="${INPUT_SKILLS_REPO##*@}"
+        else
+          REPO="$INPUT_SKILLS_REPO"
+          REF=""
+        fi
+
+        # Build clone URL — support both owner/repo shorthand and full URLs
+        if [[ "$REPO" == https://* || "$REPO" == git@* ]]; then
+          CLONE_URL="$REPO"
+        else
+          CLONE_URL="https://github.com/${REPO}.git"
+        fi
+
+        SKILLS_DIR=".deepagents/skills"
+        mkdir -p "$SKILLS_DIR"
+
+        CLONE_ARGS=(git clone --depth 1)
+        if [ -n "$REF" ]; then
+          CLONE_ARGS+=(--branch "$REF")
+        fi
+
+        TMPDIR=$(mktemp -d)
+        "${CLONE_ARGS[@]}" "$CLONE_URL" "$TMPDIR"
+
+        # Copy skill directories (those containing SKILL.md) into the skills dir
+        find "$TMPDIR" -name "SKILL.md" -type f | while read -r skill_file; do
+          skill_dir=$(dirname "$skill_file")
+          skill_name=$(basename "$skill_dir")
+          cp -r "$skill_dir" "$SKILLS_DIR/$skill_name"
+          echo "Installed skill: $skill_name"
+        done
+
+        rm -rf "$TMPDIR"
 
     - name: Run Deep Agents
       id: run-agent
