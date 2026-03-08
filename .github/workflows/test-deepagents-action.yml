@@ -1,0 +1,36 @@
+name: Test Deep Agents Action
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Prompt for the agent'
+        required: false
+        default: 'List the files in this repository and summarize what the project does.'
+
+jobs:
+  test-action:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Deep Agents
+        id: agent
+        uses: ./
+        with:
+          prompt: ${{ github.event.inputs.prompt || 'List the files in this repository and summarize what the project does.' }}
+          model: claude-sonnet-4-6
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          agent_name: test-agent
+
+      - name: Check outputs
+        shell: bash
+        run: |
+          echo "Exit code: ${{ steps.agent.outputs.exit_code }}"
+          echo "Cache hit: ${{ steps.agent.outputs.cache_hit }}"
+          echo "Response length: $(echo '${{ steps.agent.outputs.response }}' | wc -c) bytes"
