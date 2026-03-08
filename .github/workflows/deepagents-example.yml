@@ -167,7 +167,7 @@ jobs:
           rm -f "$PROMPT_FILE"
 
       - name: Run Deep Agents
-        uses: langchain-ai/deepagents@main
+        uses: langchain-ai/deepagents@john/depagents-action-hardened
         with:
           prompt: ${{ github.event_name == 'issue_comment' && steps.build-prompt.outputs.prompt || github.event.inputs.prompt }}
           model: claude-sonnet-4-6
