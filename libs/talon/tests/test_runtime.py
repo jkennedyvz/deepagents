@@ -251,7 +251,7 @@ async def test_runtime_wires_backend_checkpointer_tools_skills_and_memory(
 
     monkeypatch.setattr("deepagents_talon.runtime.create_deep_agent", fake_create_deep_agent)
     monkeypatch.setattr("deepagents_talon.runtime.fetch_url", fetch_url)
-    monkeypatch.setattr("deepagents_talon.runtime.web_search", web_search)
+    monkeypatch.setattr("deepagents_talon.runtime.create_web_search_tool", lambda _: web_search)
     monkeypatch.chdir(tmp_path)
 
     runtime = DeepAgentRuntime(
@@ -272,10 +272,9 @@ async def test_runtime_wires_backend_checkpointer_tools_skills_and_memory(
     assert captured["backend"].cwd == tmp_path.resolve()
 
     tool_names = {_tool_name(tool) for tool in captured["tools"]}
+    assert not {"fetch_url", "web_search"} & tool_names
     assert {
         "current_time",
-        "fetch_url",
-        "web_search",
         "create_job",
         "list_jobs",
         "edit_job",

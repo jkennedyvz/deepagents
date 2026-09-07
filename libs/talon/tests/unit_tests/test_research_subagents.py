@@ -15,7 +15,6 @@ from pydantic import PrivateAttr
 
 from deepagents_talon.interfaces import AgentRequest
 from deepagents_talon.runtime import DeepAgentRuntime
-from deepagents_talon.subagents import prepare_subagents
 
 
 class ToolModel(FakeMessagesListChatModel):
@@ -58,9 +57,8 @@ def _runtime(root, monkeypatch, parent, child, **kwargs: object):
     return DeepAgentRuntime(
         model="test:parent",
         assistant_dir=root,
-        include_web_tools=False,
         skills=(),
-        **{"memory": (), **kwargs},
+        **{"include_web_tools": False, "memory": (), **kwargs},
     )
 
 
@@ -70,20 +68,21 @@ def _runtime(root, monkeypatch, parent, child, **kwargs: object):
     [
         ("researcher", True),
         ("researcher", False),
-        ("general-purpose", False),
-        ("general-purpose", True),
+        ("prepared", False),
+        ("prepared", True),
     ],
 )
 async def test_research_boundaries(tmp_path, monkeypatch, background, name, attached):
     _write_agent(tmp_path, "[lookup]" if attached else "[]")
+    _write_agent(tmp_path, name="prepared")
     private = "PRIVATE-PARENT-MARKER"
     memory = tmp_path / "memory.md"
     memory.write_text(private)
     output = tmp_path / "output.txt"
     skill = tmp_path / "skill.md"
     skill.write_text("Use lookup for research.")
-    selected = ["lookup", "read_file"] if name == "general-purpose" and attached else ["lookup"]
-    launch = {"tools": selected} if name == "general-purpose" and attached else {}
+    selected = ["lookup", "read_file"] if name == "prepared" and attached else ["lookup"]
+    launch = {"tools": selected} if name == "prepared" and attached else {}
     effects = []
 
     @tool
@@ -140,7 +139,7 @@ async def test_research_boundaries(tmp_path, monkeypatch, background, name, atta
         assert child._seen[0][-1].content == "Find evidence"
         assert private not in str(child._seen)
         assert "Parent history" not in str(child._seen[0])
-        if name == "general-purpose" and attached:
+        if name == "prepared" and attached:
             assert "Use lookup for research." in str(child._seen)
         messages = child._seen[-1]
         denied = [message for message in messages if getattr(message, "status", None) == "error"]
@@ -149,7 +148,7 @@ async def test_research_boundaries(tmp_path, monkeypatch, background, name, atta
         )
         inventory = runtime._graph.nodes["tools"].bound.tools_by_name["get_agent_tools"].invoke({})
         agent = next(item for item in inventory["agents"] if item["name"] == name)
-        if name == "general-purpose":
+        if name == "prepared":
             assert "read_file" in agent["selectable_tools"]
             assert "task" not in agent["selectable_tools"]
         else:
@@ -159,11 +158,12 @@ async def test_research_boundaries(tmp_path, monkeypatch, background, name, atta
         await runtime.stop()
 
 
-@pytest.mark.parametrize("name", ["researcher", "general-purpose"])
+@pytest.mark.parametrize("name", ["researcher", "prepared"])
 async def test_explicit_shell_access(tmp_path, monkeypatch, name):
     _write_agent(tmp_path, "[execute]")
+    _write_agent(tmp_path, name="prepared")
     output = tmp_path / "child-output"
-    launch = {"tools": ["execute"]} if name == "general-purpose" else {}
+    launch = {"tools": ["execute"]} if name == "prepared" else {}
     parent = ToolModel(
         responses=[
             AIMessage(
@@ -198,13 +198,49 @@ def _inventory(runtime):
     return runtime._graph.nodes["tools"].bound.tools_by_name["get_agent_tools"].invoke({})
 
 
-@pytest.mark.parametrize(
-    "definition", [{"runnable": RunnableLambda(lambda state: state)}, {"graph_id": "remote"}]
-)
-def test_opaque_general_purpose_is_rejected(definition):
-    spec = {"name": "general-purpose", "description": "Custom agent", **definition}
-    with pytest.raises(ValueError, match="must use a name other than 'general-purpose'"):
-        prepare_subagents([spec], [], "test:model", None)
+@pytest.mark.parametrize("configured", [False, True])
+async def test_no_implicit_general_purpose_agent(tmp_path, monkeypatch, configured):
+    path = _write_agent(tmp_path) if configured else None
+    parent = ToolModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[_call("task", subagent_type="general-purpose", description="Work")],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _call(
+                        "task",
+                        subagent_type="general-purpose",
+                        description="Work",
+                        tools=["execute"],
+                    )
+                ],
+            ),
+            AIMessage(content="Done"),
+        ]
+    )
+    child = ToolModel(responses=[AIMessage(content="Must not run")])
+    runtime = _runtime(tmp_path, monkeypatch, parent, child)
+    await runtime.start()
+    try:
+        tools = runtime._graph.nodes["tools"].bound.tools_by_name
+        assert ("task" in tools) == configured
+        assert {agent["name"] for agent in _inventory(runtime)["agents"]} == (
+            {"main", "researcher"} if configured else {"main"}
+        )
+        if configured:
+            assert "general-purpose" not in tools["task"].description
+        await runtime.invoke(AgentRequest("chat", "Work"))
+        await asyncio.gather(*(job.worker for job in runtime.background._jobs.values()))
+        assert not child._seen
+        if path is not None:
+            path.unlink()
+            await runtime.reload_subagent_configuration()
+            assert "task" not in runtime._graph.nodes["tools"].bound.tools_by_name
+    finally:
+        await runtime.stop()
 
 
 @pytest.mark.parametrize("source", ["local", "supplied", "compiled"])
@@ -228,14 +264,15 @@ async def test_fork_is_rejected(tmp_path, source):
     "selection",
     [{"tools": ["missing"]}, {"tools": ["task"]}, {"tools": ["read_file", "read_file"]}],
 )
-async def test_general_requires_valid_selection(tmp_path, monkeypatch, selection):
+@pytest.mark.parametrize("name", ["researcher", "prepared"])
+async def test_task_requires_valid_selection(tmp_path, monkeypatch, selection, name):
+    _write_agent(tmp_path)
+    _write_agent(tmp_path, name="prepared")
     parent = ToolModel(
         responses=[
             AIMessage(
                 content="",
-                tool_calls=[
-                    _call("task", subagent_type="general-purpose", description="Work", **selection)
-                ],
+                tool_calls=[_call("task", subagent_type=name, description="Work", **selection)],
             ),
             AIMessage(content="Done"),
         ]
@@ -248,6 +285,84 @@ async def test_general_requires_valid_selection(tmp_path, monkeypatch, selection
         await asyncio.gather(*(job.worker for job in runtime.background._jobs.values()))
         assert not child._seen
         assert "Specify tools" in next(iter(runtime.background.results("chat").values()))
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize("protected", [False, True])
+async def test_named_task_adds_tools_without_changing_defaults(tmp_path, monkeypatch, protected):
+    path = _write_agent(tmp_path, "[first]")
+    original = path.read_text()
+    effects = []
+
+    @tool
+    def first() -> str:
+        """Read configured evidence."""
+        effects.append("first")
+        return "Source: configured"
+
+    @tool
+    def second() -> str:
+        """Perform an additional operation."""
+        effects.append("second")
+        return "Source: additional"
+
+    child = ToolModel(
+        responses=[
+            AIMessage(content="", tool_calls=[_call("first")]),
+            AIMessage(content="", tool_calls=[_call("second")]),
+            AIMessage(content="Done"),
+        ]
+    )
+    parent = ToolModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _call(
+                        "task",
+                        subagent_type="researcher",
+                        description="Research",
+                        tools=["first", "second"],
+                    )
+                ],
+            ),
+            AIMessage(content="Delegated"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _call("task", subagent_type="researcher", description="Research again")
+                ],
+            ),
+            AIMessage(content="Delegated"),
+        ]
+    )
+    runtime = _runtime(
+        tmp_path,
+        monkeypatch,
+        parent,
+        child,
+        tools=[first, second],
+        interrupt_on={"second": protected},
+    )
+    await runtime.start()
+    try:
+        await runtime.invoke(AgentRequest("chat", "Research"))
+        await asyncio.gather(*(job.worker for job in runtime.background._jobs.values()))
+        assert effects == (["first"] if protected else ["first", "second"])
+        assert set(child._tools[0]) == {"first", "second"}
+        assert "Answer the delegated question." in str(child._seen[0][0])
+        if protected:
+            assert "needs tool approval" in str(runtime.background.results("chat"))
+        child.i = 0
+        await runtime.invoke(AgentRequest("chat", "Research again"))
+        await asyncio.gather(*(job.worker for job in runtime.background._jobs.values()))
+        assert effects == (["first", "first"] if protected else ["first", "second", "first"])
+        assert child._tools[-1] == ["first"]
+        assert path.read_text() == original
+        assert next(item for item in _inventory(runtime)["agents"] if item["name"] == "researcher")[
+            "tools"
+        ] == ["first"]
     finally:
         await runtime.stop()
 

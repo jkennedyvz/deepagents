@@ -379,6 +379,35 @@ Talon loads local subagents from `agents/<name>/AGENTS.md` using YAML frontmatte
 `description` is required, `name` defaults to the directory name, and `model` is
 optional.
 
+## Research defaults
+
+Fresh homes receive ordinary `AGENTS.md` files for main, `internal-research`, and
+`external-research`, with defensive prompts. External research owns `fetch_url` and
+Tavily-backed `web_search`, attached at construction by default. Search is added
+only when `TAVILY_API_KEY` is nonempty in the runtime environment; without it,
+startup and reload still work and `fetch_url` remains available.
+Main and internal research are constructed without them; disabling web tools leaves
+external research usable without built-in web access. Internal research starts
+with `tools: []`. Main passes additional reads through `task(..., tools=[...])`, such as
+applicable GitHub, Notion, email, and calendar reads internally. No integrations are
+connected automatically. Set persistent tools with standard `tools` frontmatter;
+launch-time additions apply only to that task. Main retains filesystem, action tools, and existing
+approval controls, chooses placement from the workflow, and mediates minimal
+internal-to-external context.
+
+Existing files are unchanged; built-in web access now needs an `external-research` definition.
+Review the packaged `deepagents_talon/defaults/` files,
+back up affected instructions, and merge the selected changes without replacing custom
+content. Call `reload_subagent_configuration` and inspect `get_agent_tools`; roll back
+by restoring those files and reloading. Include restored capabilities in the rollback
+review. Running tasks retain their original graphs until finished or canceled.
+
+Prompts are not a sandbox: main filesystem/shell access, injected results, classification
+mistakes, shared runtime/credentials, and retrieval of private destinations remain
+operator-managed risks. The benign fixtures in `tests/unit_tests/fixtures/research_injections.json`
+exercise missing capabilities and approval gates with scripted calls, not model refusal
+or guaranteed public-only retrieval. Evaluate prompt behavior separately with your model.
+
 ## Background Subagents
 
 Talon loads local `agents/<name>/AGENTS.md` definitions and remote
@@ -389,12 +418,13 @@ edits retain the last valid configuration; running subagents keep their original
 configuration.
 
 Subagents use fresh task context; fork is unsupported. Attach local tools with
-`tools: [exact_tool_name]` (omitted means none); named agents use those configured tools.
-`general-purpose` defaults to no tools. Pass a `tools` list to `task` on each launch
-to grant capabilities, including `execute` for shell access. Supply context and skill
+`tools: [exact_tool_name]` (omitted means none); named agents start with those configured tools.
+There is no automatic general-purpose agent; delegate to a research role or another
+configured agent. Pass a `tools` list to `task` on each launch
+to add capabilities to any local agent for that task, including `execute` for shell access. Supply context and skill
 instructions in `description` or select
 `read_file` to load them. `get_agent_tools` shows available attachments and inactive
-edits; `list_subagents` shows per-task selections.
+edits; `list_subagents` shows launch-time additions.
 
 `task` launches local subagents and `start_async_task` launches remote subagents.
 Both return immediately. The user can continue chatting while the main agent uses
