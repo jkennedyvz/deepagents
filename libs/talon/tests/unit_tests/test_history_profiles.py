@@ -10,7 +10,7 @@ import pytest
 from langchain_core.embeddings import Embeddings
 from langchain_core.messages import HumanMessage
 
-from deepagents_talon import history_adapters
+from deepagents_talon import history_adapters, history_vectors
 from deepagents_talon.config import TalonConfig, TalonConfigError
 from deepagents_talon.history_adapters import BoundedEmbeddings, open_profile
 from deepagents_talon.history_backends import open_history
@@ -47,6 +47,16 @@ def configuration(tmp_path, **settings: str):
         {"BASE_URL": "https://key:password@example.org"},
         {"BASE_URL": "https://example.org?key=secret"},
         {"BASE_URL": "https://example.org:invalid"},
+        {"BASE_URL": "https://127.0.0.1/v1"},
+        {"BASE_URL": "https://localhost/v1"},
+        {"BASE_URL": "https://10.1.2.3/v1"},
+        {"BASE_URL": "https://169.254.169.254/v1"},
+        {"BASE_URL": "https://[::1]/v1"},
+        {"BASE_URL": "https://127.1/v1"},
+        {"BASE_URL": "https://2130706433/v1"},
+        {"BASE_URL": "https://0177.0.0.1/v1"},
+        {"BASE_URL": "https://0x7f000001/v1"},
+        {"SEND_DIMENSIONS": "maybe"},
         {"ADAPTER": "atlas", "DIMS": "1024", "MAX_INPUT_TOKENS": "512"},
     ],
 )
@@ -55,6 +65,26 @@ def test_invalid_profile_fails_during_configuration(tmp_path, settings):
         configuration(tmp_path, **settings)
     assert "password" not in str(error.value)
     assert "key=secret" not in str(error.value)
+
+
+@pytest.mark.parametrize("missing", ["DIMS", "MAX_INPUT_TOKENS"])
+def test_remote_adapters_name_the_settings_they_require(tmp_path, missing):
+    env = {
+        "DEEPAGENTS_TALON_HISTORY_VECTOR_SEARCH": "1",
+        PREFIX + "ADAPTER": "openai-compatible",
+        PREFIX + "MODEL": "test-model",
+        PREFIX + "DIMS": "2",
+        PREFIX + "MAX_INPUT_TOKENS": "512",
+    }
+    del env[PREFIX + missing]
+    with pytest.raises(TalonConfigError, match=f"{missing} is required"):
+        TalonConfig.from_env(env, base_home=tmp_path)
+
+
+def test_public_endpoints_remain_configurable(tmp_path):
+    for url in ("https://openrouter.ai/api/v1", "https://8.8.8.8/v1", "https://api.example.org/v1"):
+        profile = configuration(tmp_path, BASE_URL=url).history_embedding_profile
+        assert profile.base_url == url
 
 
 def test_fingerprint_covers_vector_space_but_not_keys_or_throughput(tmp_path):
@@ -176,6 +206,16 @@ async def test_openrouter_sends_text_and_dimensions_without_loading_local_models
         assert await profile.embed.aembed_query("question") == [1, 0]
     assert [body["input"] for body in requests] == [["document"], ["question"]]
     assert all(body["dimensions"] == 2 for body in requests)
+    requests.clear()
+    unsized = configuration(
+        tmp_path,
+        BASE_URL="https://openrouter.ai/api/v1",
+        API_KEY="test",
+        SEND_DIMENSIONS="0",
+    )
+    async with open_profile(unsized) as profile:
+        await profile.embed.aembed_documents(["document"])
+    assert all("dimensions" not in body for body in requests)
 
 
 async def test_voyage_preserves_document_and_query_input_types(tmp_path, monkeypatch):
@@ -199,12 +239,59 @@ async def test_voyage_preserves_document_and_query_input_types(tmp_path, monkeyp
     assert [texts for texts, _ in calls] == [["document"], ["question"]]
 
 
+async def test_dimension_mismatch_names_the_settings_that_resolve_it(tmp_path):
+    profile = configuration(tmp_path).history_embedding_profile
+    bounded = BoundedEmbeddings(RecordingEmbeddings(dims=4), profile)
+    with pytest.raises(BaseExceptionGroup) as error:
+        await bounded.aembed_documents(["document"])
+    message = str(error.value.exceptions[0])
+    assert "SEND_DIMENSIONS" in message
+    assert "DIMS is 2" in message
+
+
+async def test_timed_out_search_frees_its_slot_for_the_next_search(tmp_path, monkeypatch):
+    monkeypatch.setattr(history_vectors, "_SEARCH_TIMEOUT_SECONDS", 0.1)
+    raw = RecordingEmbeddings()
+    fake_adapter(monkeypatch, raw)
+    config = configuration(tmp_path, CONCURRENCY="1")
+    async with open_history(config) as archive:
+        await archive.append(SCOPE, "first", "time", [HumanMessage("car")])
+        await settled(archive)
+        raw.stall_queries = True
+        assert (await archive.search_page(SCOPE, query="automobile"))["semantic_status"] == (
+            "timeout"
+        )
+        raw.stall_queries = False
+        page = await asyncio.wait_for(archive.search_page(SCOPE, query="automobile"), 5)
+        assert page["semantic_status"] == "completed"
+
+
+async def test_search_does_not_queue_behind_indexing_at_minimum_concurrency(tmp_path, monkeypatch):
+    raw = RecordingEmbeddings()
+    fake_adapter(monkeypatch, raw)
+    config = configuration(tmp_path, CONCURRENCY="1")
+    async with open_history(config) as archive:
+        await archive.append(SCOPE, "first", "time", [HumanMessage("car")])
+        await settled(archive)
+        raw.started.clear()
+        raw.block = True
+        await archive.append(SCOPE, "second", "time", [HumanMessage("indexing")])
+        try:
+            await asyncio.wait_for(raw.started.wait(), 1)
+            page = await asyncio.wait_for(archive.search_page(SCOPE, query="automobile"), 5)
+            assert page["semantic_status"] == "completed"
+            assert raw.queries == ["automobile"]
+        finally:
+            raw.release.set()
+
+
 class RecordingEmbeddings(Embeddings):
     def __init__(self, dims=2) -> None:
         self.dims = dims
         self.documents = []
         self.queries = []
         self.block = False
+        self.stall_queries = False
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
@@ -224,6 +311,8 @@ class RecordingEmbeddings(Embeddings):
 
     async def aembed_query(self, text):
         self.queries.append(text)
+        if self.stall_queries:
+            await asyncio.sleep(1)
         return [1.0, *([0.0] * (self.dims - 1))]
 
 
