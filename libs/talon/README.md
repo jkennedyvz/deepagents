@@ -49,6 +49,37 @@ add conversation history, and existing checkpoints are not backfilled.
 The echo runtime and unwrapped custom checkpointers do not support history tools or
 reset. Custom async LangGraph checkpointers can enable history with `ConversationSaver`.
 
+Set `DEEPAGENTS_TALON_HISTORY_URI` to `mongodb://host/database` or
+`postgresql://user:password@host/database` and install the `mongodb` or `postgres`
+extra (`uv sync --extra mongodb`). All three backends use the same archive; SQLite
+is the default. This alpha requires fresh history storage. Checkpoints stay local.
+Default SQLite uses the same store factory and assistant namespace as configured
+backends, with its own connection to the checkpoint database.
+
+For a separate SQLite database, set the URI to `sqlite:///absolute/path/history.sqlite`
+or a SQLite `file:` URI, including connection options such as `?mode=rwc`.
+Paths containing spaces must be percent-encoded. All archives are
+namespaced by assistant ID, so assistants can share a database.
+
+Additional backends can be installed as Python packages without changing Talon.
+Register the URI scheme in the package's `pyproject.toml`:
+
+```toml
+[project.entry-points."deepagents_talon.history_backends"]
+mysql = "my_history_backend:open_store"
+```
+
+The entry point is a trusted operator-installed callable that accepts the unchanged
+URI and returns an async context manager yielding an initialized LangGraph
+`BaseStore`. It owns connection setup and cleanup, including cancellation, and
+validates its backend-specific URI requirements. Talon wraps the store in its shared
+archive and verifies write access before startup completes. Built-in schemes take
+precedence; unknown or duplicate plugin schemes fail startup. The plugin API is
+experimental and may change with Talon.
+
+Archives require one writer per assistant. Retrieval scans at most 500
+records and raises an error if it cannot complete the page within that budget.
+
 ## Interrupt and Continue
 
 A new message in a conversation cancels the active turn, records an interruption marker after the latest committed graph checkpoint, and starts the new message on the same thread. Partial output from the cancelled turn is not fabricated or delivered. `/stop` and `/new` also recover interrupted state; process shutdown does not. If cancellation does not finish within 30 seconds, Talon leaves the existing run isolated and does not start the new message; restart Talon to recover.
