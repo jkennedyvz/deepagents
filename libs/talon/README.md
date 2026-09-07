@@ -363,15 +363,9 @@ imports into `~/.deepagents/crowbar/`. Pass `--assistant-id <id>` to select a
 different assistant for the import, or `--target-dir <dir>` to write all
 imported files under an explicit directory.
 
-The importer writes Fleet prompts, skills, and subagent prompts. Talon loads local
-subagents from `agents/<name>/AGENTS.md` using dcode's YAML frontmatter format:
+Talon loads local subagents from `agents/<name>/AGENTS.md` using YAML frontmatter:
 `description` is required, `name` defaults to the directory name, and `model` is
-optional. Local subagents use fork mode so they inherit the current conversation and
-runtime policy; Talon also provides the standard `general-purpose` subagent unless the
-assistant defines one. Fleet `tools.json` and `config.json` are ignored and are not
-copied into the Talon agent directory. Talon does not support the old Fleet direct-run
-startup path or its environment variables; import the zip first, then run Talon against
-the materialized local assistant.
+optional.
 
 ## Background Subagents
 
@@ -381,6 +375,14 @@ definitions, the main agent can call `reload_subagent_configuration` to apply th
 changes on subsequent turns. Ordinary turns reuse the loaded definitions. Invalid
 edits retain the last valid configuration; running subagents keep their original
 configuration.
+
+Subagents use fresh task context; fork is unsupported. Attach local tools with
+`tools: [exact_tool_name]` (omitted means none); named agents use those configured tools.
+`general-purpose` defaults to no tools. Pass a `tools` list to `task` on each launch
+to grant capabilities, including `execute` for shell access. Supply context and skill
+instructions in `description` or select
+`read_file` to load them. `get_agent_tools` shows available attachments and inactive
+edits; `list_subagents` shows per-task selections.
 
 `task` launches local subagents and `start_async_task` launches remote subagents.
 Both return immediately. The user can continue chatting while the main agent uses
