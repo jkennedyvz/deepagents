@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import traceback
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from importlib.metadata import EntryPoint, EntryPoints
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 from langgraph.store.memory import InMemoryStore
 
-from deepagents_talon import history_backends
+from deepagents_talon import history_adapters, history_backends
 from deepagents_talon.archive import ArchiveScope
 from deepagents_talon.config import TalonConfig, TalonConfigError
 from deepagents_talon.history_backends import open_history
@@ -139,14 +140,15 @@ def postgres_driver(shared, state, failing):
     class Postgres:
         @classmethod
         @asynccontextmanager
-        async def from_conn_string(cls, uri) -> AsyncIterator[InMemoryStore]:
+        async def from_conn_string(cls, uri, *, index=None) -> AsyncIterator[InMemoryStore]:
             class ReadyStore(InMemoryStore):
                 async def setup(self):
                     if failing:
                         raise RuntimeError(uri)
 
-            store = ReadyStore()
+            store = ReadyStore(index=index)
             store._data = shared._data
+            store._vectors = shared._vectors
             store._task = asyncio.create_task(asyncio.Event().wait())
             state.dispatcher = store._task
             try:
@@ -157,8 +159,21 @@ def postgres_driver(shared, state, failing):
     return Postgres
 
 
+class FakeDatabase:
+    def __init__(self, uri: str) -> None:
+        self.uri = uri
+
+    def __getitem__(self, name: str) -> tuple[str, str]:
+        return self.uri, name
+
+
 def fake_backend(monkeypatch, *, failing=False, started=None, release=None):
     store = InMemoryStore()
+    mongo_data = defaultdict(InMemoryStore)
+
+    async def setup_generation(*_args: object):
+        return None
+
     state = SimpleNamespace(closed=False, dispatcher=None)
 
     class Client:
@@ -166,24 +181,31 @@ def fake_backend(monkeypatch, *, failing=False, started=None, release=None):
             self.uri = uri
 
         def get_default_database(self):
-            return {"talon_history": self.uri}
+            return FakeDatabase(self.uri)
 
         def close(self):
             state.closed = True
 
-    def mongo_store(uri):
+    def mongo_store(target, *, index_config=None, **_kwargs: object):
+        uri, collection = target
         if started is not None:
             started.set()
             release.wait(timeout=5)
         if failing:
             raise RuntimeError(uri)
-        return store
+        backend = InMemoryStore(index=index_config)
+        backend._data = mongo_data[collection]._data
+        backend._vectors = mongo_data[collection]._vectors
+        return backend
 
     def driver(module, _extra):
         if module == "pymongo":
             return SimpleNamespace(MongoClient=Client)
         return SimpleNamespace(
-            AsyncPostgresStore=postgres_driver(store, state, failing), MongoDBStore=mongo_store
+            AsyncPostgresStore=postgres_driver(store, state, failing),
+            MongoDBStore=mongo_store,
+            create_vector_index_config=lambda **kwargs: kwargs,
+            setup_generation=setup_generation,
         )
 
     monkeypatch.setattr(history_backends, "_driver", driver)
@@ -267,3 +289,40 @@ async def test_missing_backend_extra_has_install_guidance(tmp_path, monkeypatch,
     with pytest.raises(ImportError, match=f"uv sync --extra {extra}"):
         async with open_history(config):
             pytest.fail("missing backend must not fall back to SQLite")
+
+
+@pytest.mark.parametrize("scheme", ["mongodb", "postgresql"])
+async def test_env_hybrid_search_and_reset_after_disabling_vectors(tmp_path, monkeypatch, scheme):
+    from tests.store_archive_contract import StaticEmbeddings  # noqa: PLC0415
+
+    fake_backend(monkeypatch)
+    embeddings = StaticEmbeddings()
+
+    async def adapter(*_args: object):
+        return embeddings
+
+    monkeypatch.setattr(history_adapters, "_adapter", adapter)
+    env = {
+        URI_KEY: f"{scheme}://localhost/talon",
+        "DEEPAGENTS_TALON_HISTORY_VECTOR_SEARCH": "1",
+        "DEEPAGENTS_TALON_HISTORY_EMBED_DIMS": "2",
+    }
+    config = TalonConfig.from_env(env, base_home=tmp_path)
+    async with open_history(config) as archive:
+        await archive.append(SCOPE, "session", "time", [HumanMessage("car repairs")])
+        async with asyncio.timeout(2):
+            while True:
+                page = await archive.search_page(SCOPE, query="automobile")
+                if not page["indexing_pending"]:
+                    break
+                await asyncio.sleep(0)
+        assert page["semantic_status"] == "completed"
+        assert page["results"][0]["text"] == "car repairs"
+        assert page["indexing_status"] == ("unknown" if scheme == "mongodb" else "ready")
+    disabled = TalonConfig.from_env({URI_KEY: env[URI_KEY]}, base_home=tmp_path)
+    async with open_history(disabled) as archive:
+        await archive.delete_session("session")
+        assert await archive.entries(SCOPE) == []
+    async with open_history(config) as archive:
+        assert (await archive.search_page(SCOPE, query="automobile"))["results"] == []
+    assert not config.history_vector_path.exists()

@@ -21,11 +21,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from types import ModuleType
 
-    from langgraph.store.base import BaseStore
+    from langgraph.store.base import BaseStore, IndexConfig
 
     from deepagents_talon.config import TalonConfig
+    from deepagents_talon.history_profiles import EmbeddingProfile
 
 _STARTUP_TIMEOUT = 15
+_MAX_HNSW_DIMS = 2000
 type StoreFactory = Callable[[str], AbstractAsyncContextManager[BaseStore]]
 
 
@@ -37,14 +39,50 @@ async def open_history(config: TalonConfig) -> AsyncIterator[StoreConversationAr
         config: Host configuration containing the optional history URI.
     """
     uri = config.history_uri or config.checkpoint_path.as_uri()
-    factory = _store_factory(urlsplit(uri).scheme)
-    async with factory(uri) as metadata:
+    scheme = urlsplit(uri).scheme
+    if (
+        config.history_vector_search
+        and config.history_embedding_profile.adapter == "atlas"
+        and scheme not in {"mongodb", "mongodb+srv"}
+    ):
+        msg = "Atlas server-side embeddings require a MongoDB history backend"
+        raise TalonConfigError(msg)
+    factory = _store_factory(scheme)
+    from deepagents_talon.history_adapters import open_profile  # noqa: PLC0415
+    from deepagents_talon.history_vector_backends import (  # noqa: PLC0415
+        prepare_generation,
+        vector_backend,
+    )
+
+    async with factory(uri) as metadata, AsyncExitStack() as stack:
         archive = StoreConversationArchive(metadata, namespace=("talon", config.assistant_id))
         try:
-            async with asyncio.timeout(_STARTUP_TIMEOUT), archive.records.access():
-                root = await archive.records.root()
-                await archive.records.commit([("root", root)])
-        except Exception:  # noqa: BLE001  # Archive setup can surface credential-bearing driver errors.
+            generation = await prepare_generation(config, archive)
+        except TalonConfigError:
+            raise
+        except Exception:  # noqa: BLE001  # Metadata errors may include URI credentials.
+            msg = "Could not initialize history archive; check permissions and storage format"
+            raise TalonConfigError(msg) from None
+        profile = await stack.enter_async_context(open_profile(config))
+        vectors = (
+            await stack.enter_async_context(vector_backend(config, profile, generation))
+            if generation is not None
+            else None
+        )
+        archive = StoreConversationArchive(
+            metadata,
+            namespace=("talon", config.assistant_id),
+            vector_store=vectors,
+            vector_search=config.history_vector_search,
+            embedding_profile=profile,
+            search_visibility="unknown"
+            if urlsplit(uri).scheme.startswith("mongodb")
+            else "immediate",
+        )
+        try:
+            async with asyncio.timeout(_STARTUP_TIMEOUT):
+                await stack.enter_async_context(archive.open())
+        except Exception:  # noqa: BLE001  # Driver errors may contain credentials.
             msg = "Could not initialize history archive; check permissions and storage format"
             raise TalonConfigError(msg) from None
         yield archive
@@ -114,16 +152,24 @@ def _driver(module: str, extra: str) -> ModuleType:
 
 
 @asynccontextmanager
-async def _postgres_store(uri: str) -> AsyncIterator[BaseStore]:
+async def _postgres_store(
+    uri: str, *, index: IndexConfig | None = None, generation: str = ""
+) -> AsyncIterator[BaseStore]:
     _validate_remote_uri(uri)
     driver = _driver("langgraph.store.postgres.aio", "postgres")
     async with AsyncExitStack() as stack:
         try:
             async with asyncio.timeout(_STARTUP_TIMEOUT):
                 store = await stack.enter_async_context(
-                    driver.AsyncPostgresStore.from_conn_string(uri)
+                    driver.AsyncPostgresStore.from_conn_string(uri, index=index)
                 )
                 stack.push_async_callback(_stop_dispatcher, store)
+                if index is not None and index["dims"] > _MAX_HNSW_DIMS:
+                    store.index_config["ann_index_config"] = {"kind": "flat"}
+                if generation:
+                    await _driver("deepagents_talon.history_postgres", "postgres").setup_generation(
+                        store, generation
+                    )
                 await store.setup()
         except Exception:  # noqa: BLE001  # Driver startup errors may contain URI credentials.
             msg = "Could not initialize PostgreSQL history; check the URI, server, and permissions"
@@ -140,7 +186,13 @@ async def _stop_dispatcher(store: BaseStore) -> None:
 
 
 @asynccontextmanager
-async def _mongodb_store(uri: str) -> AsyncIterator[BaseStore]:
+async def _mongodb_store(
+    uri: str,
+    *,
+    index: IndexConfig | None = None,
+    collection: str = "talon_history",
+    profile: EmbeddingProfile | None = None,
+) -> AsyncIterator[BaseStore]:
     _validate_remote_uri(uri)
     driver = _driver("langgraph.store.mongodb", "mongodb")
     pymongo = _driver("pymongo", "mongodb")
@@ -156,8 +208,27 @@ async def _mongodb_store(uri: str) -> AsyncIterator[BaseStore]:
                 w="majority",
             )
             stack.push_async_callback(asyncio.to_thread, client.close)
-            collection = client.get_default_database()["talon_history"]
-            store = await finish(asyncio.to_thread(driver.MongoDBStore, collection))
+            target = client.get_default_database()[collection]
+            config = (
+                driver.create_vector_index_config(
+                    embed=index["embed"],
+                    dims=-1 if profile and not profile.client_side else index["dims"],
+                    fields=["text"],
+                    relevance_score_fn=None if profile and not profile.client_side else "cosine",
+                    embedding_key="embedding",
+                )
+                if index is not None
+                else None
+            )
+            store = await finish(
+                asyncio.to_thread(
+                    driver.MongoDBStore,
+                    target,
+                    index_config=config,
+                    auto_index_timeout=60,
+                    query_model=profile.query_model or None if profile else None,
+                )
+            )
         except Exception:  # noqa: BLE001  # Driver startup errors may contain URI credentials.
             msg = "Could not initialize MongoDB history; check the URI, server, and permissions"
             raise TalonConfigError(msg) from None

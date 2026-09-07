@@ -31,6 +31,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+history-local = [
+    "sentence-transformers>=5.2.0,<7.0.0",
+    "transformers>=5.12.1,<6.0.0",
+]
+history-voyage = ["langchain-voyageai>=0.4.1,<0.5.0"]
+history-openai = ["langchain-openai>=1.1.14,<2.0.0"]
 mongodb = [
     "langgraph-store-mongodb>=0.4.0,<0.5.0",
 ]
@@ -88,6 +94,15 @@ deepagents-code = { path = "../code", editable = true }
 [tool.ty.environment]
 python-version = "3.12"
 extra-paths = ["../deepagents", "../code"]
+
+[tool.ty.analysis]
+# Lazy-loaded postgres/history-voyage extras are absent from minimal CI installs.
+allowed-unresolved-imports = [
+    "psycopg",
+    "langgraph.store.postgres.aio",
+    "voyageai",
+    "langchain_voyageai",
+]
 
 [tool.ty.rules]
 division-by-zero = "error"

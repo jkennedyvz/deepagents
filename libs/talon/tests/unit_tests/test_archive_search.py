@@ -39,14 +39,14 @@ async def test_search_matches_complete_revisions_with_bounded_display(tmp_path, 
     async with make_saver(str(tmp_path / "history.sqlite")) as saver:
         await _save(saver, content)
         await _save(saver, content)
-        hits = await saver.archive.entries(SCOPE, query=query)
+        hits = (await saver.archive.search_page(SCOPE, query=query))["results"]
         assert len(hits) == 1
         assert hits[0]["session_id"] == "session"
         chunks = await saver.archive.entries(SCOPE, session_id="session", limit=20)
         assert "".join(chunk["text"] for chunk in chunks) == content
         assert all(len(chunk["text"]) <= CHUNK_SIZE for chunk in chunks)
         await saver.clear_history(SCOPE)
-        assert await saver.archive.entries(SCOPE, query=query) == []
+        assert (await saver.archive.search_page(SCOPE, query=query))["results"] == []
         async with saver.checkpointer.conn.execute("SELECT value FROM store") as cursor:
             assert content not in str(await cursor.fetchall())
 
@@ -61,12 +61,12 @@ async def test_archive_search_survives_reopening_without_checkpoints(tmp_path):
         await saver.checkpointer.conn.commit()
     for _ in range(2):
         async with make_saver(path) as saver:
-            hits = await saver.archive.entries(SCOPE, query="pineapple")
+            hits = (await saver.archive.search_page(SCOPE, query="pineapple"))["results"]
             assert len(hits) == 1
             assert hits[0]["cursor"] == before[0]["cursor"]
             assert await saver.archive.entries(SCOPE, session_id="session") == before
     async with make_saver(path) as saver:
         await saver.adelete_thread("session")
-        assert await saver.archive.entries(SCOPE, query="pineapple") == []
+        assert (await saver.archive.search_page(SCOPE, query="pineapple"))["results"] == []
         async with saver.checkpointer.conn.execute("SELECT value FROM store") as cursor:
             assert content not in str(await cursor.fetchall())
