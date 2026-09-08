@@ -20,8 +20,8 @@ from deepagents_talon.archive import (
     SearchPage,
     SearchVisibility,
     SemanticStatus,
-    _indexing_status,
-    _search_page,
+    build_search_page,
+    indexing_status,
 )
 
 if TYPE_CHECKING:
@@ -45,6 +45,10 @@ _BATCH_TIMEOUT_SECONDS = 300
 # Unacknowledged work is retried from durable state on the next start, so abandoning
 # a wedged batch at shutdown costs a repeat, never data.
 _CLOSE_TIMEOUT_SECONDS = 10
+# Cancellation normally lands on the next loop iteration; this only has to outlast
+# that, and bounds a Store that never honours it. Together these are the whole of
+# `close()`'s wait: no await in it is unbounded.
+_CANCEL_GRACE_SECONDS = 1
 
 
 @dataclass
@@ -101,15 +105,36 @@ class HistoryVectorIndex:
     async def close(self) -> None:
         """Finish the active batch before the caller closes database connections.
 
-        A Store write that never returns must not hold host shutdown open forever, so
-        the batch is abandoned once the deadline passes and retried on the next start.
+        Returns within `_CLOSE_TIMEOUT_SECONDS + _CANCEL_GRACE_SECONDS`, having asked
+        every in-flight operation to stop. It cannot promise they have: `_batch` shields
+        the Store task so a cancelled caller cannot leave a partial batch, and a Store
+        that runs blocking work in a thread cannot be interrupted from this loop at all.
+        A batch still running when this returns is abandoned, not awaited - the caller
+        may then close connections underneath it, and the Store may log errors as that
+        happens. That is the deliberate trade: unacknowledged work is retried on the
+        next start, so an abandoned batch costs a repeat, while a wedged `close()`
+        costs the host its shutdown.
         """
         self.stopping = True
         self.wake.set()
-        tasks = [task for task in (self.task, *self._pending) if task is not None]
-        if not tasks:
-            return
-        _, unfinished = await asyncio.wait(tasks, timeout=_CLOSE_TIMEOUT_SECONDS)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _CLOSE_TIMEOUT_SECONDS
+        # `_pending` is not stable here. `stopping` is only checked at the top of the
+        # worker's loop, so a worker already inside an iteration still registers its
+        # Store task afterwards - and `_batch` shields that task, so cancelling the
+        # worker does not stop it. A single snapshot would let `close()` return while
+        # a write is in flight, and the caller then tears the Store down underneath it.
+        while True:
+            tasks = [
+                task for task in (self.task, *self._pending) if task is not None and not task.done()
+            ]
+            remaining = deadline - loop.time()
+            if not tasks or remaining <= 0:
+                break
+            await asyncio.wait(tasks, timeout=remaining)
+        unfinished = [
+            task for task in (self.task, *self._pending) if task is not None and not task.done()
+        ]
         if unfinished:
             logger.warning(
                 "History vector indexing did not stop within %ss; abandoning the active batch "
@@ -118,7 +143,21 @@ class HistoryVectorIndex:
             )
             for task in unfinished:
                 task.cancel()
-            await asyncio.gather(*unfinished, return_exceptions=True)
+            # Cancellation needs its own grace rather than the remainder of the
+            # deadline above, which the drain loop has usually just exhausted: it
+            # normally lands on the next loop iteration, and waiting ~0s for it would
+            # abandon batches that were about to stop. Bounded, because a Store that
+            # ignores or defers cancellation would otherwise block here forever -
+            # the same wedged shutdown this deadline exists to prevent.
+            _, running = await asyncio.wait(unfinished, timeout=_CANCEL_GRACE_SECONDS)
+            if running:
+                logger.error(
+                    "History vector indexing ignored cancellation; abandoning %d in-flight "
+                    "Store operation(s) and continuing shutdown. Unacknowledged work is "
+                    "retried on the next start, and the Store may report errors as its "
+                    "connection closes underneath them.",
+                    len(running),
+                )
         if self.task is not None and not self.task.cancelled() and (error := self.task.exception()):
             raise error
 
@@ -256,7 +295,7 @@ class HistoryVectorIndex:
         if after and (
             snapshot is None or snapshot.query != cache_key or cursor not in snapshot.keys
         ):
-            return _search_page(
+            return build_search_page(
                 [],
                 limit,
                 "not_requested",
@@ -277,13 +316,13 @@ class HistoryVectorIndex:
         if len(self._pages) > _MAX_SEARCH_PAGES:
             self._pages.popitem(last=False)
         hits = await self.archive.ranked(scope, snapshot.keys, int(cursor or 0), limit + 1)
-        page = _search_page(
+        page = build_search_page(
             hits,
             limit,
             snapshot.status,
             pending=pending or snapshot.pending,
         )
-        page["indexing_status"] = _indexing_status(
+        page["indexing_status"] = indexing_status(
             snapshot.status, pending=page["indexing_pending"], visibility=self.search_visibility
         )
         if page["next_after"] is not None:
