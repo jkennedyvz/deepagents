@@ -3,7 +3,8 @@ FROM ghcr.io/astral-sh/uv:python3.13-bookworm
 ARG GCX_VERSION=0.4.0
 ARG TEA_VERSION=0.14.1
 
-ENV DEBIAN_FRONTEND=noninteractive \
+ENV DEEPAGENTS_TALON_HOME=/root/.deepagents \
+    DEBIAN_FRONTEND=noninteractive \
     NODE_PATH=/opt/whatsapp-bridge/node_modules \
     PATH="/opt/deepagents-talon-venv/bin:${PATH}" \
     UV_LINK_MODE=copy \
@@ -58,6 +59,8 @@ RUN mkdir -p /opt/whatsapp-bridge && \
     npm install --omit=dev
 
 RUN cd libs/talon && uv sync --frozen --extra media
+
+VOLUME ["/root/.deepagents"]
 
 WORKDIR /workspace
 

@@ -14,6 +14,7 @@ services:
       DEEPAGENTS_TALON_VOICE_TRANSCRIPTION_DEVICE: ${DEEPAGENTS_TALON_VOICE_TRANSCRIPTION_DEVICE:-cpu}
     volumes:
       - ${HOME}/talon-workspace:/workspace
+      # Includes shared model assets in cache/models/huggingface.
       - ${HOME}/.deepagents:/root/.deepagents
     command: >
       bash -c "

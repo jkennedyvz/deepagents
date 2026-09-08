@@ -224,6 +224,32 @@ DEEPAGENTS_TALON_VOICE_TRANSCRIPTION_ENABLED=true
 
 When enabled without `DEEPAGENTS_TALON_VOICE_TRANSCRIPTION_MODEL`, Talon uses the same local default as the original WhatsApp example: `nvidia/parakeet-tdt-0.6b-v3` through Transformers, with ffmpeg converting inbound audio to 16 kHz mono WAV first. Set `DEEPAGENTS_TALON_VOICE_TRANSCRIPTION_DEVICE=cuda` to use a GPU. The legacy example variables `SPEECH_ENABLED` and `SPEECH_DEVICE` are also accepted. Setting `DEEPAGENTS_TALON_VOICE_TRANSCRIPTION_MODEL` to a non-Parakeet model keeps the existing OpenAI SDK transcription path.
 
+### Local model cache
+
+Local model assets are downloaded lazily into
+`$DEEPAGENTS_TALON_HOME/cache/models/huggingface` (normally
+`~/.deepagents/cache/models/huggingface`), shared across assistant IDs. Talon
+passes this cache explicitly, so `HF_HOME`, `HF_HUB_CACHE`, and
+`TRANSFORMERS_CACHE` cannot redirect these downloads. There is no separate cache
+path override. Cache directory symlinks and descendant links escaping the cache
+are rejected; keep the Talon home writable only by trusted local users.
+
+The first transcription downloads a complete Hugging Face snapshot. Subsequent
+processes reuse it; Hugging Face may check for upstream updates when online and
+can reuse a complete cached snapshot when offline. This persists assets, not a
+pinned model revision. Transformers loads the snapshot locally with remote code
+disabled. Thread initialization is serialized, and Hugging Face's file locks
+coordinate downloads across processes on filesystems supporting file locks.
+Failed initialization is retryable; transcription failures are logged and the
+original channel message is preserved. Ensure enough disk space for the full
+snapshot. Existing caches outside Talon home are not migrated automatically.
+
+Parakeet is Talon's only built-in local ML asset downloader. Qwen model names in
+chat-provider configuration select externally served models; there is no
+Qwen/Quinn local loader in Talon. Non-Parakeet voice overrides use the OpenAI SDK
+and do not download local model assets.
+
+
 `open` exposure allows arbitrary WhatsApp senders to trigger the agent while it runs with the operator's model credentials, channel credentials, MCP tool access, and local-host access when the local execution backend is active. Enabling it requires explicit acknowledgement:
 
 ```bash
