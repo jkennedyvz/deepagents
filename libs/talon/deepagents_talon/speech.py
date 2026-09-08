@@ -243,7 +243,7 @@ def _transcribe_local_sync(path: Path, *, model: str, device: str, config: Talon
 
 
 def _load_local_pipeline(model: str, device: str, config: TalonConfig) -> _LocalSpeechPipeline:
-    cache = config.home.parent / "cache" / "models" / "huggingface"
+    cache = config.huggingface_cache_dir
     key = (model, device, cache)
     cached = _local_pipelines.get(key)
     if cached is not None:

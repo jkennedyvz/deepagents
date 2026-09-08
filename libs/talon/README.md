@@ -224,7 +224,7 @@ DEEPAGENTS_TALON_VOICE_TRANSCRIPTION_ENABLED=true
 
 When enabled without `DEEPAGENTS_TALON_VOICE_TRANSCRIPTION_MODEL`, Talon uses the same local default as the original WhatsApp example: `nvidia/parakeet-tdt-0.6b-v3` through Transformers, with ffmpeg converting inbound audio to 16 kHz mono WAV first. Set `DEEPAGENTS_TALON_VOICE_TRANSCRIPTION_DEVICE=cuda` to use a GPU. The legacy example variables `SPEECH_ENABLED` and `SPEECH_DEVICE` are also accepted. Setting `DEEPAGENTS_TALON_VOICE_TRANSCRIPTION_MODEL` to a non-Parakeet model keeps the existing OpenAI SDK transcription path.
 
-Local Parakeet downloads are cached in
+Local Parakeet and Qwen embedding model downloads share a Hugging Face cache in
 `$DEEPAGENTS_TALON_HOME/cache/models/huggingface` (default:
 `~/.deepagents/cache/models/huggingface`), shared across assistants.
 
